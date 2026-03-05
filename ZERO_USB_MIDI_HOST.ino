@@ -32,352 +32,125 @@
  * the messages received from each USB MIDI device.
  */
 // This file is an adaptation of https://github.com/rppicomidi/EZ_USB_MIDI_HOST/blob/main/examples/arduino/EZ_USB_MIDI_HOST_example/EZ_USB_MIDI_HOST_example.ino for hardware implementation based on RP204 zero by Waveshare https://www.waveshare.com/wiki/RP2040-Zero or equivalent.
-// It compiles with TinyUSB library. The only edits doe is to drive WS2812 LED alreadyu onboard, instead if sinle LED IO.
 
-#if !defined(USE_TINYUSB_HOST) || !defined(USE_TINYUSB)
-#error "Please use the Menu to select Tools->USB Stack: Adafruit TinyUSB Host"
+#ifndef USE_TINYUSB_HOST
+#error "Please Select USB Stack: Adafruit TinyUSB Host"
 #else
 #warning "All Serial Monitor Output is on Serial1"
 #endif
-
 #include "EZ_USB_MIDI_HOST.h"
-// USB Host object
-Adafruit_USBH_Host USBHost;
-USING_NAMESPACE_MIDI
+
+//#define LED_BUILTIN 25 // not defined for RPi2040_Zero
+#include "Adafruit_NeoPixel.h"  // Zero has WS2812 on  GP16
+Adafruit_NeoPixel strip(1, 16, NEO_GRB + NEO_KHZ800);
+
+// Create the USB Host driver object
+static Adafruit_USBH_Host USBHost;
+
 USING_NAMESPACE_EZ_USB_MIDI_HOST
+USING_NAMESPACE_MIDI
 
-RPPICOMIDI_EZ_USB_MIDI_HOST_INSTANCE(usbhMIDI, MidiHostSettingsDefault)
+// Create the Hardware Serial object DINmidi with the default baud rate but the same interface settings as the USB host port
+struct MidiHostSettings : public MidiHostSettingsDefault {
+  // If you need to change the settings for either the USB host or serial port, do it
+  // in this structure. For example, to change the maximum SysEx message payload size to 256
+  //  static const unsigned SysExMaxSize = 256;
+  //  static const unsigned MidiRxBufsize = RPPICOMIDI_EZ_USB_MIDI_HOST_GET_BUFSIZE(SysExMaxSize);
+  //  static const unsigned MidiTxBufsize = RPPICOMIDI_EZ_USB_MIDI_HOST_GET_BUFSIZE(SysExMaxSize);
+};
+SerialMIDI<HardwareSerial, DefaultSerialSettings> serialDINmidi(Serial2);
+MidiInterface<SerialMIDI<HardwareSerial, DefaultSerialSettings>, MidiHostSettings> DINmidi((SerialMIDI<HardwareSerial, DefaultSerialSettings>&)serialDINmidi);
 
-/* MIDI IN MESSAGE REPORTING */
-static void onMidiError(int8_t errCode)
+// Create the USB MIDI Host Driver Object
+RPPICOMIDI_EZ_USB_MIDI_HOST_INSTANCE(USBmidi, MidiHostSettings)
+
+static uint8_t midiDevAddr = 0;
+
+// DEFINE MESSAGE ROUTING
+// Note that the MidiMessage data type from one MidiInterface type
+// is not the same as the MidiMessage data type from another one
+static void onUSBMIDIin(const MidiInterface<EZ_USB_MIDI_HOST_Transport<MidiHostSettings>>::MidiMessage& mes)
 {
-    Serial1.printf("MIDI Errors: %s %s %s\r\n", (errCode & (1UL << ErrorParse)) ? "Parse":"",
-        (errCode & (1UL << ErrorActiveSensingTimeout)) ? "Active Sensing Timeout" : "",
-        (errCode & (1UL << WarningSplitSysEx)) ? "Split SysEx":"");
+  //printf("usb:%02x %02x %02x %02x\r\n", mes.type, mes.data1, mes.data2, mes.channel);
+  DINmidi.send(mes.type, mes.data1, mes.data2, mes.channel);
 }
 
-static void printAddrAndCable()
+static void onDINMIDIin(const MidiInterface<HardwareSerial>::MidiMessage& mes)
 {
-    uint8_t midiDevAddr, cable;
-    usbhMIDI.getCurrentReadDevAndCable(midiDevAddr, cable);
-    Serial1.printf("[%02d,%02d] ",midiDevAddr, cable);
+  auto intf = USBmidi.getInterfaceFromDeviceAndCable(midiDevAddr, 0);
+  if (intf != nullptr) {
+    //printf("din:%02x %02x %02x %02x\r\n", mes.type, mes.data1, mes.data2, mes.channel);
+    intf->send(mes.type, mes.data1, mes.data2, mes.channel);
+  }
 }
 
-static void onNoteOff(Channel channel, byte note, byte velocity)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: Note off#%u v=%u\r\n", channel, note, velocity);
-}
-
-static void onNoteOn(Channel channel, byte note, byte velocity)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: Note on#%u v=%u\r\n", channel, note, velocity);
-}
-
-static void onPolyphonicAftertouch(Channel channel, byte note, byte amount)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: PAT#%u=%u\r\n", channel, note, amount);
-}
-
-static void onControlChange(Channel channel, byte controller, byte value)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: CC#%u=%u\r\n", channel, controller, value);
-}
-
-static void onProgramChange(Channel channel, byte program)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: Prog=%u\r\n", channel, program);
-}
-
-static void onAftertouch(Channel channel, byte value)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: AT=%u\r\n", channel, value);
-}
-
-static void onPitchBend(Channel channel, int value)
-{
-    printAddrAndCable();
-    Serial1.printf("C%u: PB=%d\r\n", channel, value);
-}
-
-static void onSysEx(byte * array, unsigned size)
-{
-    printAddrAndCable();
-    Serial1.printf("SysEx:\r\n");
-    unsigned multipleOf8 = size/8;
-    unsigned remOf8 = size % 8;
-    for (unsigned idx=0; idx < multipleOf8; idx++) {
-        for (unsigned jdx = 0; jdx < 8; jdx++) {
-            Serial1.printf("%02x ", *array++);
-        }
-        Serial1.printf("\r\n");
-    }
-    for (unsigned idx = 0; idx < remOf8; idx++) {
-        Serial1.printf("%02x ", *array++);
-    }
-    Serial1.printf("\r\n");
-}
-
-static void onSMPTEqf(byte data)
-{
-    printAddrAndCable();
-    uint8_t type = (data >> 4) & 0xF;
-    data &= 0xF;    
-    static const char* fps[4] = {"24", "25", "30DF", "30ND"};
-    switch (type) {
-        case 0: Serial1.printf("SMPTE FRM LS %u \r\n", data); break;
-        case 1: Serial1.printf("SMPTE FRM MS %u \r\n", data); break;
-        case 2: Serial1.printf("SMPTE SEC LS %u \r\n", data); break;
-        case 3: Serial1.printf("SMPTE SEC MS %u \r\n", data); break;
-        case 4: Serial1.printf("SMPTE MIN LS %u \r\n", data); break;
-        case 5: Serial1.printf("SMPTE MIN MS %u \r\n", data); break;
-        case 6: Serial1.printf("SMPTE HR LS %u \r\n", data); break;
-        case 7:
-            Serial1.printf("SMPTE HR MS %u FPS:%s\r\n", data & 0x1, fps[(data >> 1) & 3]);
-            break;
-        default:
-          Serial1.printf("invalid SMPTE data byte %u\r\n", data);
-          break;
-    }
-}
-
-static void onSongPosition(unsigned beats)
-{
-    printAddrAndCable();
-    Serial1.printf("SongP=%u\r\n", beats);
-}
-
-static void onSongSelect(byte songnumber)
-{
-    printAddrAndCable();
-    Serial1.printf("SongS#%u\r\n", songnumber);
-}
-
-static void onTuneRequest()
-{
-    printAddrAndCable();
-    Serial1.printf("Tune\r\n");
-}
-
-static void onMidiClock()
-{
-    printAddrAndCable();
-    Serial1.printf("Clock\r\n");
-}
-
-static void onMidiStart()
-{
-    printAddrAndCable();
-    Serial1.printf("Start\r\n");
-}
-
-static void onMidiContinue()
-{
-    printAddrAndCable();
-    Serial1.printf("Cont\r\n");
-}
-
-static void onMidiStop()
-{
-    printAddrAndCable();
-    Serial1.printf("Stop\r\n");
-}
-
-static void onActiveSense()
-{
-    printAddrAndCable();
-    Serial1.printf("ASen\r\n");
-}
-
-static void onSystemReset()
-{
-    printAddrAndCable();
-    Serial1.printf("SysRst\r\n");
-}
-
-static void onMidiTick()
-{
-    printAddrAndCable();
-    Serial1.printf("Tick\r\n");
-}
-
-static void onMidiInWriteFail(uint8_t devAddr, uint8_t cable, bool fifoOverflow)
-{
-    if (fifoOverflow)
-        Serial1.printf("[%02d,%02d] MIDI IN FIFO overflow\r\n", devAddr, cable);
-    else
-        Serial1.printf("[%02d,%02d] MIDI IN FIFO error\r\n", devAddr, cable);
-}
-
-static void registerMidiInCallbacks(uint8_t midiDevAddr)
-{
-    uint8_t ncables = usbhMIDI.getNumInCables(midiDevAddr);
-    for (uint8_t cable = 0; cable < ncables; cable++) {
-        auto intf = usbhMIDI.getInterfaceFromDeviceAndCable(midiDevAddr, cable);
-        intf->setHandleNoteOff(onNoteOff);                      // 0x80
-        intf->setHandleNoteOn(onNoteOn);                        // 0x90
-        intf->setHandleAfterTouchPoly(onPolyphonicAftertouch);  // 0xA0
-        intf->setHandleControlChange(onControlChange);          // 0xB0
-        intf->setHandleProgramChange(onProgramChange);          // 0xC0
-        intf->setHandleAfterTouchChannel(onAftertouch);         // 0xD0
-        intf->setHandlePitchBend(onPitchBend);                  // 0xE0
-        intf->setHandleSystemExclusive(onSysEx);                // 0xF0, 0xF7
-        intf->setHandleTimeCodeQuarterFrame(onSMPTEqf);         // 0xF1
-        intf->setHandleSongPosition(onSongPosition);            // 0xF2
-        intf->setHandleSongSelect(onSongSelect);                // 0xF3
-        intf->setHandleTuneRequest(onTuneRequest);              // 0xF6
-        intf->setHandleClock(onMidiClock);                      // 0xF8
-        // 0xF9 as 10ms Tick is not MIDI 1.0 standard but implemented in the Arduino MIDI Library
-        intf->setHandleTick(onMidiTick);                        // 0xF9
-        intf->setHandleStart(onMidiStart);                      // 0xFA
-        intf->setHandleContinue(onMidiContinue);                // 0xFB
-        intf->setHandleStop(onMidiStop);                        // 0xFC
-        intf->setHandleActiveSensing(onActiveSense);            // 0xFE
-        intf->setHandleSystemReset(onSystemReset);              // 0xFF
-        intf->setHandleError(onMidiError);
-    }
-    auto dev = usbhMIDI.getDevFromDevAddr(midiDevAddr);
-    if (dev == nullptr)
-        return;
-    dev->setOnMidiInWriteFail(onMidiInWriteFail);
-}
-
-static void unregisterMidiInCallbacks(uint8_t midiDevAddr)
-{
-    uint8_t ncables = usbhMIDI.getNumInCables(midiDevAddr);
-    for (uint8_t cable = 0; cable < ncables; cable++) {
-        auto intf = usbhMIDI.getInterfaceFromDeviceAndCable(midiDevAddr, cable);
-        if (intf == nullptr)
-            return;
-        intf->disconnectCallbackFromType(NoteOn);
-        intf->disconnectCallbackFromType(NoteOff);
-        intf->disconnectCallbackFromType(AfterTouchPoly);
-        intf->disconnectCallbackFromType(ControlChange);
-        intf->disconnectCallbackFromType(ProgramChange);
-        intf->disconnectCallbackFromType(AfterTouchChannel);
-        intf->disconnectCallbackFromType(PitchBend);
-        intf->disconnectCallbackFromType(SystemExclusive);
-        intf->disconnectCallbackFromType(TimeCodeQuarterFrame);
-        intf->disconnectCallbackFromType(SongPosition);
-        intf->disconnectCallbackFromType(SongSelect);
-        intf->disconnectCallbackFromType(TuneRequest);
-        intf->disconnectCallbackFromType(Clock);
-        // 0xF9 as 10ms Tick is not MIDI 1.0 standard but implemented in the Arduino MIDI Library
-        intf->disconnectCallbackFromType(Tick);
-        intf->disconnectCallbackFromType(Start);
-        intf->disconnectCallbackFromType(Continue);
-        intf->disconnectCallbackFromType(Stop);
-        intf->disconnectCallbackFromType(ActiveSensing);
-        intf->disconnectCallbackFromType(SystemReset);
-        intf->setHandleError(nullptr);
-    }
-    auto dev = usbhMIDI.getDevFromDevAddr(midiDevAddr);
-    if (dev == nullptr)
-        return;
-    dev->setOnMidiInWriteFail(nullptr);
-}
-
-/* CONNECTION MANAGEMENT */
-static void listConnectedDevices()
-{
-    Serial1.printf("Dev  VID:PID  Product Name[Manufacter]{serial string}\r\n");
-    for (uint8_t midiDevAddr = 1; midiDevAddr <= RPPICOMIDI_TUH_MIDI_MAX_DEV; midiDevAddr++) {
-        auto dev = usbhMIDI.getDevFromDevAddr(midiDevAddr);
-        if (dev) {
-            Serial1.printf("%02u  %04x:%04x %s[%s]{%s}\r\n",midiDevAddr, dev->getVID(), dev->getPID(),
-                dev->getProductStr(), dev->getManufacturerStr(), dev->getSerialString());
-        }
-    }
-}
+// CONNECTION MANAGEMENT
 static void onMIDIconnect(uint8_t devAddr, uint8_t nInCables, uint8_t nOutCables)
 {
-    Serial1.printf("MIDI device at address %u has %u IN cables and %u OUT cables\r\n", devAddr, nInCables, nOutCables);
-    registerMidiInCallbacks(devAddr);
-    listConnectedDevices();
+  if (midiDevAddr != 0) {
+    Serial1.println("Device Ignored. This program can only handle one USB MIDI device at a time.\r\n");
+  }
+  Serial1.printf("MIDI device at address %u has %u IN cables and %u OUT cables\r\n", devAddr, nInCables, nOutCables);
+  midiDevAddr = devAddr;
+  auto intf = USBmidi.getInterfaceFromDeviceAndCable(midiDevAddr, 0);
+  if (intf == nullptr)
+    return;
+  intf->setHandleMessage(onUSBMIDIin);
+  //digitalWrite(LED_BUILTIN, HIGH); //instead use NeoPixel
+    strip.setPixelColor(0, strip.Color(0,   128,   128));
+    strip.show(); 
 }
 
 static void onMIDIdisconnect(uint8_t devAddr)
 {
-    Serial1.printf("MIDI device at address %u unplugged\r\n", devAddr);
-    unregisterMidiInCallbacks(devAddr);
-    // Note that listConnectedDevices() will still list the just unplugged
-    //  device as connected until this function returns
-    listConnectedDevices();
+  Serial1.printf("MIDI device at address %u unplugged\r\n", devAddr);
+  midiDevAddr = 0;
+  //digitalWrite(LED_BUILTIN, LOW); 
+        strip.setPixelColor(0, strip.Color(255,   0,   0));
+        strip.show();
 }
 
-
-/* MAIN LOOP FUNCTIONS */
-
-static void blinkLED(void)
-{
-    const uint32_t intervalMs = 1000;
-    static uint32_t startMs = 0;
-
-    static bool ledState = false;
-    if ( millis() - startMs < intervalMs)
-        return;
-    startMs += intervalMs;
-
-    ledState = !ledState;
-    digitalWrite(LED_BUILTIN, ledState ? HIGH:LOW); 
-}
-
-static void sendNextNote()
-{
-    static uint8_t firstNote = 0x5b; // Mackie Control rewind
-    static uint8_t lastNote = 0x5f; // Mackie Control stop
-    static uint8_t offNote = lastNote;
-    static uint8_t onNote = firstNote;
-    const uint32_t intervalMs = 1000;
-    static uint32_t startMs = 0;
-    if (millis() - startMs < intervalMs)
-        return; // not enough time
-    startMs += intervalMs;
-    for (uint8_t midiDevAddr = 1; midiDevAddr <= RPPICOMIDI_TUH_MIDI_MAX_DEV; midiDevAddr++) {
-        auto intf = usbhMIDI.getInterfaceFromDeviceAndCable(midiDevAddr, usbhMIDI.getNumOutCables(midiDevAddr)-1);
-        if (intf == nullptr)
-            continue; // not connected
-        intf->sendNoteOn(offNote, 0, 1);
-        intf->sendNoteOn(onNote, 0x7f, 1);
-        
-    }
-    if (++offNote > lastNote)
-        offNote = firstNote;
-    if (++onNote > lastNote)
-        onNote = firstNote;
-}
-
-
-/* APPLICATION STARTS HERE */
-void setup()
-{
+// Program initializations are in this function
+void setup() {
+  // Make sure the LED is off
+  //digitalWrite(LED_BUILTIN, LOW); 
+      strip.setPixelColor(0, strip.Color(255,   0,   0));
+      strip.show(); 
+  //pinMode(LED_BUILTIN, OUTPUT);
+  // Enable serial printf port
   Serial1.begin(115200);
 
-  while(!Serial1);   // wait for serial port
-  pinMode(LED_BUILTIN, OUTPUT);
-  usbhMIDI.begin(&USBHost, 0, onMIDIconnect, onMIDIdisconnect);
-  Serial1.println("EZ_USB_MIDI_HOST Example");
+  // Enable low level USB Host driver to use the RP2040 native USB port
+  USBHost.begin(0);
+
+  // Set up UART1 on pins GP4 and GP5, which are pins 6 & 7 on a Pico board
+  Serial2.setTX(4);
+  Serial2.setRX(5);
+  // Tell DINmidi to route all incoming messages to the onDINMIDIin function
+  DINmidi.setHandleMessage(onDINMIDIin);
+  // Start the serial port MIDI in device
+  DINmidi.begin(MIDI_CHANNEL_OMNI);
+
+  // Initialize USB connection management
+  USBmidi.setAppOnConnect(onMIDIconnect);
+  USBmidi.setAppOnDisconnect(onMIDIdisconnect);
+  while(!Serial1) {}
+  delay(1000);
+  Serial1.println("EZ_MIDI2USB_HOST to Serial MIDI\r\n");
+
+  strip.begin();           // INITIALIZE NeoPixel strip object (REQUIRED)
+  strip.show();            // Turn OFF all pixels ASAP
+  strip.setBrightness(50);
 }
 
-void loop() {    
-    // Update the USB Host
-    USBHost.task();
-
-    // Handle any incoming data; triggers MIDI IN callbacks
-    usbhMIDI.readAll();
-    
-    // Do other processing that might generate pending MIDI OUT data
-    sendNextNote();
-    
-    // Tell the USB Host to send as much pending MIDI OUT data as possible
-    usbhMIDI.writeFlushAll();
-    
-    // Do other non-USB host processing
-    blinkLED();
+// Program main loop is here
+void loop() {
+  // Update USB Host transfers
+  USBHost.task();
+  // Poll the USB host MIDI
+  USBmidi.readAll();
+  // Poll the serial port MIDI
+  DINmidi.read();
+  // Flush any writes after reading the serial port MIDI to USB packets
+  USBmidi.writeFlushAll();
 }
-
