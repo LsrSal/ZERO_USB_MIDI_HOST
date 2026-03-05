@@ -1,4 +1,4 @@
-My hardware implementation of USB MIDI host adapter based on this library: https://www.waveshare.com/wiki/RP2040-Zero
+My hardware implementation of USB MIDI host adapter based on this library: https://github.com/rppicomidi/EZ_USB_MIDI_HOST and this board: https://www.waveshare.com/wiki/RP2040-Zero
 
 For host port I use onboard USB-C connector, no need for any modification. Use C-male to A-female (pictured) or C-female to B-male with UCB-C M-M cable.
 5V power provided through additional USB-C dumb jack.
